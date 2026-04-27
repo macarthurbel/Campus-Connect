@@ -7,7 +7,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import javafx.animation.PauseTransition;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.beans.property.SimpleObjectProperty;
@@ -41,7 +40,6 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
-import javafx.util.Duration;
 
 public final class DashboardFactory {
 
@@ -1200,13 +1198,17 @@ public final class DashboardFactory {
         button.setDisable(true);
         button.setText(loadingLabel);
 
-        PauseTransition pause = new PauseTransition(Duration.millis(220));
-        pause.setOnFinished(event -> {
+        try {
             action.run();
+        } catch (RuntimeException ex) {
+            String message = ex.getMessage() == null || ex.getMessage().isBlank()
+                ? "Operation impossible. Verifiez les donnees saisies."
+                : ex.getMessage();
+            showInfo("Operation echouee", message);
+        } finally {
             button.setText(initialText);
             button.setDisable(false);
-        });
-        pause.playFromStart();
+        }
     }
 
     private static <T> Dialog<T> createEntityDialog(String title, String subtitle) {

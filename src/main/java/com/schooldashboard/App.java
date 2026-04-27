@@ -2,7 +2,6 @@ package com.schooldashboard;
 
 import com.schooldashboard.ui.DashboardFactory;
 import javafx.application.Application;
-import javafx.animation.PauseTransition;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -18,7 +17,6 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
-import javafx.util.Duration;
 
 public class App extends Application {
 
@@ -97,9 +95,7 @@ public class App extends Application {
             loginButton.setText("Connexion...");
             status.setText("Verification en cours...");
             status.getStyleClass().setAll("login-status", "login-status-info");
-
-            PauseTransition pause = new PauseTransition(Duration.millis(650));
-            pause.setOnFinished(ignored -> {
+            try {
                 loginButton.setDisable(false);
                 loginButton.setText("Se connecter");
                 status.setText("Connexion reussie.");
@@ -111,8 +107,12 @@ public class App extends Application {
                     default -> "Student Dashboard";
                 };
                 showDashboardScene(roleTitle);
-            });
-            pause.playFromStart();
+            } catch (RuntimeException ex) {
+                loginButton.setDisable(false);
+                loginButton.setText("Se connecter");
+                status.setText(ex.getMessage());
+                status.getStyleClass().setAll("login-status", "login-status-error");
+            }
         });
 
         VBox card = new VBox(10, logo, welcome, subtitle, profile, buildFieldGroup("Matricule", matricule), buildFieldGroup("Mot de passe", password), loginButton, forgotButton, status);
