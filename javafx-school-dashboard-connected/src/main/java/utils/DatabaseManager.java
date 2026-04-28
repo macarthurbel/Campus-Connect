@@ -120,6 +120,20 @@ public final class DatabaseManager {
                 """);
 
             statement.execute("""
+                CREATE TABLE IF NOT EXISTS notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    etudiant_id INTEGER NOT NULL,
+                    cours_id INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    coefficient REAL NOT NULL,
+                    date_creation TEXT NOT NULL,
+                    UNIQUE (etudiant_id, cours_id),
+                    FOREIGN KEY (etudiant_id) REFERENCES etudiants(id) ON DELETE CASCADE,
+                    FOREIGN KEY (cours_id) REFERENCES cours(id) ON DELETE CASCADE
+                )
+                """);
+
+            statement.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,

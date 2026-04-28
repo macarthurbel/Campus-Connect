@@ -121,6 +121,32 @@ public class SeanceDao {
         }
     }
 
+    public boolean update(Seance seance) {
+        String sql = """
+            UPDATE seances 
+            SET id_seance = ?, date_seance = ?, heure_debut = ?, heure_fin = ?, groupe_id = ?, enseignant_id = ?, salle_id = ?, cours_id = ?
+            WHERE id = ?
+            """;
+
+        try (Connection connection = DatabaseManager.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+
+            statement.setString(1, seance.getIdSeance());
+            statement.setString(2, seance.getDateIso());
+            statement.setString(3, seance.getHeureDebutIso());
+            statement.setString(4, seance.getHeureFinIso());
+            statement.setInt(5, seance.getGroupe().getId());
+            statement.setInt(6, seance.getEnseignant().getId());
+            statement.setInt(7, seance.getSalle().getId());
+            statement.setInt(8, seance.getCours().getId());
+            statement.setInt(9, seance.getId());
+            
+            return statement.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw new RuntimeException("Erreur update Seance", e);
+        }
+    }
+
     private Seance mapRow(ResultSet rs) throws SQLException {
         Groupe groupe = groupeDao.findById(rs.getInt("groupe_id"))
                 .orElseThrow(() -> new IllegalStateException("Groupe introuvable pour seance"));

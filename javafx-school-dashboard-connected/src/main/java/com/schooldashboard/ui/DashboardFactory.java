@@ -4,11 +4,17 @@ import dao.CoursDao;
 import dao.EnseignantDao;
 import dao.EtudiantDao;
 import dao.GroupeDao;
+import dao.InscriptionDao;
+import dao.NotesDao;
 import dao.SalleDao;
+import dao.SeanceDao;
 import services.AuthService;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +50,7 @@ import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
@@ -75,6 +82,28 @@ public final class DashboardFactory {
         activateModule(state, state.allowedModules.get(0));
 
         return new Scene(root, 1280, 800);
+    }
+
+    private static java.time.LocalDate parseDay(String dayName) {
+        java.time.LocalDate today = java.time.LocalDate.now();
+        java.time.DayOfWeek targetDay = switch (dayName) {
+            case "Lundi" -> java.time.DayOfWeek.MONDAY;
+            case "Mardi" -> java.time.DayOfWeek.TUESDAY;
+            case "Mercredi" -> java.time.DayOfWeek.WEDNESDAY;
+            case "Jeudi" -> java.time.DayOfWeek.THURSDAY;
+            case "Vendredi" -> java.time.DayOfWeek.FRIDAY;
+            case "Samedi" -> java.time.DayOfWeek.SATURDAY;
+            case "Dimanche" -> java.time.DayOfWeek.SUNDAY;
+            default -> today.getDayOfWeek();
+        };
+        
+        // Find the next occurrence of the target day
+        int daysUntilTarget = (targetDay.getValue() - today.getDayOfWeek().getValue() + 7) % 7;
+        if (daysUntilTarget == 0) {
+            // Today is the target day, use next week's occurrence
+            daysUntilTarget = 7;
+        }
+        return today.plusDays(daysUntilTarget);
     }
 
     private static HBox buildTopBar(DashboardState state, Runnable onBack) {
@@ -480,265 +509,457 @@ public final class DashboardFactory {
     }
 
     private static Node buildEnrollmentsPage(DashboardState state) {
-        VBox page = createPageShell("Inscription", "Flux interactif en 3 etapes");
+        if (state.isAdminMode()) {
+            return buildAdminEnrollmentsPage(state);
+        } else if (state.isStudentMode()) {
+            return buildStudentEnrollmentsPage(state);
+        } else {
+            return buildTeacherEnrollmentsPage(state);
+        }
+    }
 
-        Label stepLabel = new Label();
-        stepLabel.getStyleClass().add("step-caption");
+    private static Node buildAdminEnrollmentsPage(DashboardState state) {
+        VBox page = createPageShell("Inscriptions", "Vue d'ensemble delle inscriptions par groupe");
 
-        HBox stepper = new HBox(10);
-        stepper.setAlignment(Pos.CENTER);
-
-        Label step1 = stepCircle("1");
-        Label step2 = stepCircle("2");
-        Label step3 = stepCircle("3");
-        stepper.getChildren().addAll(step1, connector(), step2, connector(), step3);
-
-        StackPane content = new StackPane();
-        content.getStyleClass().add("panel-card");
-        content.setPadding(new Insets(16));
-
-        ListView<Student> studentList = new ListView<>(state.students);
-        studentList.setCellFactory(list -> new ListCell<>() {
-            @Override
-            protected void updateItem(Student item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.matricule() + " - " + item.fullName() + " - " + item.track());
+        // Créer une liste groupée par groupe/matière
+        Map<String, ObservableList<String>> enrollmentsByGroup = new LinkedHashMap<>();
+        for (String enrollment : state.recentEnrollments) {
+            // Format: "Etudiant - Cours - Groupe"
+            String[] parts = enrollment.split(" - ");
+            if (parts.length >= 3) {
+                String group = parts[2];
+                enrollmentsByGroup.computeIfAbsent(group, k -> FXCollections.observableArrayList()).add(enrollment);
             }
-        });
-        studentList.setPrefHeight(220);
+        }
 
-        ComboBox<Course> courseCombo = new ComboBox<>(state.courses);
-        courseCombo.setCellFactory(list -> new ListCell<>() {
-            @Override
-            protected void updateItem(Course item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.code() + " - " + item.title());
+        VBox container = new VBox(10);
+        container.setPadding(new Insets(10));
+
+        for (Map.Entry<String, ObservableList<String>> entry : enrollmentsByGroup.entrySet()) {
+            String groupName = entry.getKey();
+            ObservableList<String> enrollments = entry.getValue();
+
+            Label groupLabel = new Label(groupName);
+            groupLabel.getStyleClass().add("section-title");
+
+            ListView<String> enrollmentList = new ListView<>(enrollments);
+            enrollmentList.setPrefHeight(150);
+            enrollmentList.getStyleClass().add("simple-list");
+
+            VBox groupPanel = new VBox(8, groupLabel, enrollmentList);
+            groupPanel.getStyleClass().add("panel-card");
+            groupPanel.setPadding(new Insets(12));
+
+            container.getChildren().add(groupPanel);
+        }
+
+        if (enrollmentsByGroup.isEmpty()) {
+            Label empty = new Label("Aucune inscription pour le moment");
+            empty.getStyleClass().add("section-subtitle");
+            container.getChildren().add(empty);
+        }
+
+        ScrollPane scroll = new ScrollPane(container);
+        scroll.setFitToWidth(true);
+        page.getChildren().add(scroll);
+
+        return page;
+    }
+
+    private static Node buildStudentEnrollmentsPage(DashboardState state) {
+        VBox page = createPageShell("Mes Inscriptions", "Mes inscriptions recentes par groupe");
+
+        Student currentStudent = state.currentStudent();
+        if (currentStudent == null) {
+            Label empty = new Label("Aucune information etudiant disponible");
+            empty.getStyleClass().add("section-subtitle");
+            page.getChildren().add(empty);
+            return page;
+        }
+
+        // Filtrer les inscriptions de l'étudiant actuel
+        Map<String, ObservableList<String>> enrollmentsByGroup = new LinkedHashMap<>();
+        String studentName = currentStudent.fullName();
+        
+        for (String enrollment : state.recentEnrollments) {
+            // Format: "Etudiant - Cours - Groupe"
+            if (enrollment.startsWith(studentName)) {
+                String[] parts = enrollment.split(" - ");
+                if (parts.length >= 3) {
+                    String group = parts[2];
+                    enrollmentsByGroup.computeIfAbsent(group, k -> FXCollections.observableArrayList()).add(enrollment);
+                }
             }
-        });
-        courseCombo.setButtonCell(courseCombo.getCellFactory().call(null));
+        }
 
-        ComboBox<GroupLine> groupCombo = new ComboBox<>(state.groups);
-        groupCombo.setCellFactory(list -> new ListCell<>() {
-            @Override
-            protected void updateItem(GroupLine item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.name() + " - " + item.track());
+        VBox container = new VBox(10);
+        container.setPadding(new Insets(10));
+
+        if (enrollmentsByGroup.isEmpty()) {
+            Label empty = new Label("Vous n'avez aucune inscription pour le moment");
+            empty.getStyleClass().add("section-subtitle");
+            container.getChildren().add(empty);
+        } else {
+            for (Map.Entry<String, ObservableList<String>> entry : enrollmentsByGroup.entrySet()) {
+                String groupName = entry.getKey();
+                ObservableList<String> enrollments = entry.getValue();
+
+                Label groupLabel = new Label(groupName);
+                groupLabel.getStyleClass().add("section-title");
+
+                ListView<String> enrollmentList = new ListView<>(enrollments);
+                enrollmentList.setPrefHeight(100);
+                enrollmentList.getStyleClass().add("simple-list");
+
+                VBox groupPanel = new VBox(8, groupLabel, enrollmentList);
+                groupPanel.getStyleClass().add("panel-card");
+                groupPanel.setPadding(new Insets(12));
+
+                container.getChildren().add(groupPanel);
             }
-        });
-        groupCombo.setButtonCell(groupCombo.getCellFactory().call(null));
+        }
 
-        Label confirmSummary = new Label();
-        confirmSummary.setWrapText(true);
+        ScrollPane scroll = new ScrollPane(container);
+        scroll.setFitToWidth(true);
+        page.getChildren().add(scroll);
 
-        VBox stepOneBox = new VBox(10, new Label("Etape 1: Selectionner un etudiant"), studentList);
-        VBox stepTwoBox = new VBox(10, new Label("Etape 2: Selectionner un cours et un groupe"), courseCombo, groupCombo);
-        VBox stepThreeBox = new VBox(10, new Label("Etape 3: Confirmation"), confirmSummary);
+        return page;
+    }
 
-        Button back = new Button("Retour");
-        back.getStyleClass().addAll("action-button", "secondary-action");
+    private static Node buildTeacherEnrollmentsPage(DashboardState state) {
+        VBox page = createPageShell("Inscriptions", "Inscriptions par groupe");
 
-        Button next = new Button("Suivant");
-        next.getStyleClass().addAll("action-button", "primary-action");
-
-        HBox controls = new HBox(8, back, next);
-
-        AtomicInteger step = new AtomicInteger(1);
-
-        Runnable renderStep = () -> {
-            int current = step.get();
-            stepLabel.setText("Etape " + current + " sur 3");
-
-            step1.getStyleClass().setAll("step-circle");
-            step2.getStyleClass().setAll("step-circle");
-            step3.getStyleClass().setAll("step-circle");
-            if (current >= 1) {
-                step1.getStyleClass().add("step-active");
+        // Afficher les inscriptions groupées par groupe
+        Map<String, ObservableList<String>> enrollmentsByGroup = new LinkedHashMap<>();
+        for (String enrollment : state.recentEnrollments) {
+            String[] parts = enrollment.split(" - ");
+            if (parts.length >= 3) {
+                String group = parts[2];
+                enrollmentsByGroup.computeIfAbsent(group, k -> FXCollections.observableArrayList()).add(enrollment);
             }
-            if (current >= 2) {
-                step2.getStyleClass().add("step-active");
-            }
-            if (current >= 3) {
-                step3.getStyleClass().add("step-active");
-            }
+        }
 
-            if (current == 1) {
-                content.getChildren().setAll(stepOneBox);
-                back.setDisable(true);
-                next.setText("Suivant");
-            } else if (current == 2) {
-                content.getChildren().setAll(stepTwoBox);
-                back.setDisable(false);
-                next.setText("Suivant");
-            } else {
-                Student selectedStudent = studentList.getSelectionModel().getSelectedItem();
-                Course selectedCourse = courseCombo.getValue();
-                GroupLine selectedGroup = groupCombo.getValue();
-                String studentText = selectedStudent == null ? "Aucun etudiant" : selectedStudent.fullName();
-                String courseText = selectedCourse == null ? "Aucun cours" : selectedCourse.title();
-                String groupText = selectedGroup == null ? "Aucun groupe" : selectedGroup.name();
-                confirmSummary.setText("Etudiant: " + studentText + "\nCours: " + courseText + "\nGroupe: " + groupText);
-                content.getChildren().setAll(stepThreeBox);
-                back.setDisable(false);
-                next.setText("Confirmer inscription");
-            }
-        };
+        VBox container = new VBox(10);
+        container.setPadding(new Insets(10));
 
-        back.setOnAction(event -> {
-            if (step.get() > 1) {
-                step.decrementAndGet();
-                renderStep.run();
-            }
-        });
+        for (Map.Entry<String, ObservableList<String>> entry : enrollmentsByGroup.entrySet()) {
+            String groupName = entry.getKey();
+            ObservableList<String> enrollments = entry.getValue();
 
-        next.setOnAction(event -> {
-            if (step.get() == 1 && studentList.getSelectionModel().getSelectedItem() == null) {
-                showInfo("Selection requise", "Veuillez selectionner un etudiant.");
-                return;
-            }
-            if (step.get() == 2 && (courseCombo.getValue() == null || groupCombo.getValue() == null)) {
-                showInfo("Informations manquantes", "Veuillez selectionner un cours et un groupe.");
-                return;
-            }
-            if (step.get() < 3) {
-                step.incrementAndGet();
-                renderStep.run();
-                return;
-            }
+            Label groupLabel = new Label(groupName);
+            groupLabel.getStyleClass().add("section-title");
 
-            Student selectedStudent = studentList.getSelectionModel().getSelectedItem();
-            Course selectedCourse = courseCombo.getValue();
-            GroupLine selectedGroup = groupCombo.getValue();
-            String newEnrollment = selectedStudent.fullName() + " - " + selectedCourse.title() + " - " + selectedGroup.name();
-            state.recentEnrollments.add(0, newEnrollment);
-            if (state.recentEnrollments.size() > 10) {
-                state.recentEnrollments.remove(state.recentEnrollments.size() - 1);
-            }
-            showInfo("Inscription enregistree", "L'inscription a ete confirmee avec succes.");
-            step.set(1);
-            renderStep.run();
-        });
+            ListView<String> enrollmentList = new ListView<>(enrollments);
+            enrollmentList.setPrefHeight(120);
+            enrollmentList.getStyleClass().add("simple-list");
 
-        renderStep.run();
-        page.getChildren().addAll(stepper, stepLabel, content, controls);
+            VBox groupPanel = new VBox(8, groupLabel, enrollmentList);
+            groupPanel.getStyleClass().add("panel-card");
+            groupPanel.setPadding(new Insets(12));
+
+            container.getChildren().add(groupPanel);
+        }
+
+        if (enrollmentsByGroup.isEmpty()) {
+            Label empty = new Label("Aucune inscription pour le moment");
+            empty.getStyleClass().add("section-subtitle");
+            container.getChildren().add(empty);
+        }
+
+        ScrollPane scroll = new ScrollPane(container);
+        scroll.setFitToWidth(true);
+        page.getChildren().add(scroll);
+
         return page;
     }
 
     private static Node buildNotesPage(DashboardState state) {
         VBox page = createPageShell("Notes", "Saisie et suivi des notes par etudiant");
 
-        ComboBox<Student> studentCombo = new ComboBox<>(state.students);
-        studentCombo.setPromptText("Selectionner un etudiant");
-        studentCombo.setCellFactory(list -> new ListCell<>() {
-            @Override
-            protected void updateItem(Student item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.matricule() + " - " + item.fullName());
-            }
-        });
-        studentCombo.setButtonCell(studentCombo.getCellFactory().call(null));
-
-        ComboBox<Course> courseCombo = new ComboBox<>(state.courses);
-        courseCombo.setPromptText("Selectionner un cours");
-        courseCombo.setCellFactory(list -> new ListCell<>() {
-            @Override
-            protected void updateItem(Course item, boolean empty) {
-                super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.title());
-            }
-        });
-        courseCombo.setButtonCell(courseCombo.getCellFactory().call(null));
-
         TableView<NoteLine> table = new TableView<>(state.notes);
         table.getStyleClass().add("data-table");
 
-        TableColumn<NoteLine, String> studentCol = textColumn("ETUDIANT", NoteLine::studentProperty, 260);
+        TableColumn<NoteLine, String> studentCol = textColumn("ETUDIANT", NoteLine::studentProperty, 220);
         TableColumn<NoteLine, String> courseCol = textColumn("COURS", NoteLine::courseProperty, 180);
         TableColumn<NoteLine, Number> noteCol = new TableColumn<>("NOTE");
         noteCol.setCellValueFactory(data -> data.getValue().scoreProperty());
-        noteCol.setPrefWidth(120);
+        noteCol.setPrefWidth(100);
 
-        TableColumn<NoteLine, Number> coefCol = new TableColumn<>("COEFFICIENT");
+        TableColumn<NoteLine, Number> coefCol = new TableColumn<>("COEF");
         coefCol.setCellValueFactory(data -> data.getValue().coefProperty());
-        coefCol.setPrefWidth(120);
-
-        TableColumn<NoteLine, NoteLine> actionCol = new TableColumn<>("ACTIONS");
-        actionCol.setPrefWidth(220);
-        actionCol.setCellValueFactory(data -> new SimpleObjectProperty<>(data.getValue()));
-        actionCol.setCellFactory(col -> new TableCell<>() {
-            private final Button plus = new Button("+1");
-            private final Button minus = new Button("-1");
-            private final HBox box = new HBox(6, plus, minus);
-
-            {
-                plus.getStyleClass().add("mini-action");
-                minus.getStyleClass().add("mini-danger");
-                plus.setOnAction(event -> {
-                    NoteLine line = getItem();
-                    if (line != null) {
-                        line.scoreProperty().set(Math.min(20.0, line.scoreProperty().get() + 1.0));
-                        table.refresh();
-                    }
-                });
-                minus.setOnAction(event -> {
-                    NoteLine line = getItem();
-                    if (line != null) {
-                        line.scoreProperty().set(Math.max(0.0, line.scoreProperty().get() - 1.0));
-                        table.refresh();
-                    }
-                });
-            }
-
-            @Override
-            protected void updateItem(NoteLine item, boolean empty) {
-                super.updateItem(item, empty);
-                setGraphic(empty || item == null ? null : box);
-            }
-        });
+        coefCol.setPrefWidth(80);
 
         if (state.isStudentMode()) {
             table.getColumns().setAll(courseCol, noteCol, coefCol);
+        } else if (state.isTeacherMode()) {
+            TableColumn<NoteLine, NoteLine> actionCol = new TableColumn<>("ACTIONS");
+            actionCol.setPrefWidth(180);
+            actionCol.setCellValueFactory(data -> new SimpleObjectProperty<>(data.getValue()));
+            actionCol.setCellFactory(col -> new TableCell<>() {
+                private final Button edit = new Button("Editer");
+                private final Button delete = new Button("Supprimer");
+                private final HBox box = new HBox(6, edit, delete);
+
+                {
+                    edit.getStyleClass().add("mini-action");
+                    delete.getStyleClass().add("mini-danger");
+                    edit.setOnAction(event -> {
+                        NoteLine line = getItem();
+                        if (line != null) {
+                            Optional<NoteInput> input = showNoteForm(
+                                line.studentProperty().get(),
+                                line.courseProperty().get(),
+                                line.scoreProperty().get(),
+                                line.coefProperty().get()
+                            );
+                            input.ifPresent(data -> {
+                                line.scoreProperty().set(data.score());
+                                line.coefProperty().set(data.coef());
+                                
+                                // Persister les modifications en base de données
+                                if (line.getId() > 0) {
+                                    try {
+                                        models.Note note = new models.Note(line.getId(), line.getStudentId(), line.getCourseId(), data.score(), data.coef(), LocalDateTime.now().format(DateTimeFormatter.ISO_DATE_TIME));
+                                        state.notesDao.update(note);
+                                    } catch (Exception e) {
+                                        showInfo("Erreur", "Erreur lors de la mise à jour : " + e.getMessage());
+                                    }
+                                }
+                                
+                                table.refresh();
+                            });
+                        }
+                    });
+                    delete.setOnAction(event -> {
+                        NoteLine line = getItem();
+                        if (line != null && showConfirm("Confirmation", "Supprimer cette note ?")) {
+                            // Supprimer de la base de données
+                            if (line.getId() > 0) {
+                                try {
+                                    state.notesDao.deleteById(line.getId());
+                                } catch (Exception e) {
+                                    showInfo("Erreur", "Erreur lors de la suppression : " + e.getMessage());
+                                }
+                            }
+                            state.notes.remove(line);
+                        }
+                    });
+                }
+
+                @Override
+                protected void updateItem(NoteLine item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setGraphic(empty || item == null ? null : box);
+                }
+            });
+            table.getColumns().setAll(studentCol, courseCol, noteCol, coefCol, actionCol);
         } else {
-            if (state.isTeacherMode()) {
-                table.getColumns().setAll(studentCol, courseCol, noteCol, coefCol, actionCol);
-            } else {
-                table.getColumns().setAll(studentCol, courseCol, noteCol, coefCol);
-            }
+            table.getColumns().setAll(studentCol, courseCol, noteCol, coefCol);
         }
 
         Button addLine = new Button("+ Ajouter note");
         addLine.getStyleClass().addAll("action-button", "primary-action");
-        addLine.setOnAction(event -> runMockAction(addLine, "Ajout...", () -> {
-            if (!state.isTeacherMode()) {
-                showInfo("Action non autorisee", "Seuls les enseignants peuvent saisir les notes.");
-                return;
-            }
-            if (studentCombo.getValue() == null) {
-                showInfo("Etudiant requis", "Selectionnez un etudiant dans la liste.");
-                return;
-            }
-            if (state.students.isEmpty()) {
-                showInfo("Aucun etudiant", "Aucun etudiant disponible pour vos cours assignes.");
-                return;
-            }
-            if (courseCombo.getValue() == null) {
-                showInfo("Cours requis", "Selectionnez un cours dans la liste.");
-                return;
-            }
+        addLine.setOnAction(event -> {
             if (state.courses.isEmpty()) {
                 showInfo("Aucun cours", "Aucun cours ne vous est assigne pour le moment.");
                 return;
             }
-            Student student = studentCombo.getValue();
-            Course course = courseCombo.getValue();
-            state.notes.add(new NoteLine(student.fullName(), course.title(), 12.0, 2.0));
-        }));
+            if (state.students.isEmpty()) {
+                showInfo("Aucun etudiant", "Aucun etudiant disponible.");
+                return;
+            }
+
+            ComboBox<Student> studentCombo = new ComboBox<>(state.students);
+            studentCombo.setPromptText("Selectionner un etudiant");
+            studentCombo.setPrefWidth(300);
+            studentCombo.setCellFactory(list -> new ListCell<>() {
+                @Override
+                protected void updateItem(Student item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.matricule() + " - " + item.fullName());
+                }
+            });
+            studentCombo.setButtonCell(studentCombo.getCellFactory().call(null));
+
+            ComboBox<Course> courseCombo = new ComboBox<>(state.courses);
+            courseCombo.setPromptText("Selectionner un cours");
+            courseCombo.setPrefWidth(300);
+            courseCombo.setCellFactory(list -> new ListCell<>() {
+                @Override
+                protected void updateItem(Course item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.title());
+                }
+            });
+            courseCombo.setButtonCell(courseCombo.getCellFactory().call(null));
+
+            Dialog<NoteInput> dialog = createEntityDialog("Ajouter une note", "Remplir les informations de la note");
+            ButtonType saveType = new ButtonType("Ajouter", ButtonBar.ButtonData.OK_DONE);
+            dialog.getDialogPane().getButtonTypes().addAll(saveType, ButtonType.CANCEL);
+            styleDialogButtons(dialog, saveType);
+
+            GridPane grid = formGrid();
+            addFormRow(grid, 0, "Etudiant", studentCombo);
+            addFormRow(grid, 1, "Cours", courseCombo);
+
+            TextField scoreField = new TextField("12.0");
+            scoreField.setPromptText("Note (0-20)");
+            addFormRow(grid, 2, "Note", scoreField);
+
+            TextField coefField = new TextField("2.0");
+            coefField.setPromptText("Coefficient");
+            addFormRow(grid, 3, "Coefficient", coefField);
+
+            dialog.getDialogPane().setContent(grid);
+
+            Node saveButton = dialog.getDialogPane().lookupButton(saveType);
+            saveButton.disableProperty().bind(
+                studentCombo.valueProperty().isNull()
+                    .or(courseCombo.valueProperty().isNull())
+                    .or(scoreField.textProperty().isEmpty())
+                    .or(coefField.textProperty().isEmpty())
+            );
+
+            dialog.setResultConverter(button -> {
+                if (button == saveType) {
+                    try {
+                        Student student = studentCombo.getValue();
+                        Course course = courseCombo.getValue();
+                        String studentName = student.fullName();
+                        String courseName = course.title();
+
+                        // Vérifier les doublons
+                        for (NoteLine note : state.notes) {
+                            if (note.studentProperty().get().equalsIgnoreCase(studentName)
+                                    && note.courseProperty().get().equalsIgnoreCase(courseName)) {
+                                showInfo("Doublon detecte", "Une note existe déjà pour cet étudiant dans ce cours.");
+                                return null;
+                            }
+                        }
+
+                        double score = Double.parseDouble(scoreField.getText().trim());
+                        double coef = Double.parseDouble(coefField.getText().trim());
+
+                        if (score < 0 || score > 20) {
+                            showInfo("Note invalide", "La note doit etre entre 0 et 20.");
+                            return null;
+                        }
+
+                        if (coef <= 0) {
+                            showInfo("Coefficient invalide", "Le coefficient doit etre positif.");
+                            return null;
+                        }
+
+                        return new NoteInput(studentName, courseName, score, coef);
+                    } catch (NumberFormatException e) {
+                        showInfo("Format invalide", "Veuillez entrer des nombres valides.");
+                        return null;
+                    }
+                }
+                return null;
+            });
+
+            Optional<NoteInput> result = dialog.showAndWait();
+            result.ifPresent(data -> {
+                try {
+                    // Chercher les IDs dans la base de données
+                    Student selectedStudent = studentCombo.getValue();
+                    Course selectedCourse = courseCombo.getValue();
+                    
+                    if (selectedStudent != null && selectedCourse != null) {
+                        // Chercher l'étudiant et le cours dans la base
+                        Optional<models.Etudiant> etudiantOpt = state.etudiantDao.findAll().stream()
+                            .filter(e -> e.getMatricule().equals(selectedStudent.matricule()))
+                            .findFirst();
+                        
+                        Optional<models.Cours> coursOpt = state.coursDao.findAll().stream()
+                            .filter(c -> c.getIntitule().equals(selectedCourse.title()))
+                            .findFirst();
+                        
+                        if (etudiantOpt.isPresent() && coursOpt.isPresent()) {
+                            models.Etudiant etudiant = etudiantOpt.get();
+                            models.Cours cours = coursOpt.get();
+                            
+                            // Créer et persister la note
+                            String dateCreation = LocalDateTime.now().format(DateTimeFormatter.ISO_DATE_TIME);
+                            models.Note note = new models.Note(etudiant.getId(), cours.getId(), data.score(), data.coef(), dateCreation);
+                            state.notesDao.save(note);
+                            
+                            // Ajouter à l'interface avec les IDs
+                            state.notes.add(new NoteLine(note.getId(), etudiant.getId(), cours.getId(), data.student(), data.course(), data.score(), data.coef()));
+                        }
+                    }
+                } catch (Exception e) {
+                    showInfo("Erreur", "Erreur lors de l'enregistrement de la note : " + e.getMessage());
+                }
+            });
+        });
 
         if (state.isStudentMode() || state.isAdminMode()) {
-            page.getChildren().addAll(courseCombo, table);
+            page.getChildren().addAll(table);
         } else {
-            page.getChildren().addAll(studentCombo, courseCombo, addLine, table);
+            page.getChildren().addAll(addLine, table);
         }
         return page;
+    }
+
+    private static Optional<NoteInput> showNoteForm(String student, String course, double score, double coef) {
+        Dialog<NoteInput> dialog = createEntityDialog("Modifier la note", "Mettre a jour les informations");
+        ButtonType saveType = new ButtonType("Enregistrer", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(saveType, ButtonType.CANCEL);
+        styleDialogButtons(dialog, saveType);
+
+        Label studentLabel = new Label(student);
+        studentLabel.getStyleClass().add("form-label");
+        Label courseLabel = new Label(course);
+        courseLabel.getStyleClass().add("form-label");
+
+        TextField scoreField = new TextField(String.valueOf(score));
+        scoreField.setPromptText("Note (0-20)");
+
+        TextField coefField = new TextField(String.valueOf(coef));
+        coefField.setPromptText("Coefficient");
+
+        GridPane grid = formGrid();
+        addFormRow(grid, 0, "Etudiant", studentLabel);
+        addFormRow(grid, 1, "Cours", courseLabel);
+        addFormRow(grid, 2, "Note", scoreField);
+        addFormRow(grid, 3, "Coefficient", coefField);
+
+        dialog.getDialogPane().setContent(grid);
+
+        Node saveButton = dialog.getDialogPane().lookupButton(saveType);
+        saveButton.disableProperty().bind(
+            scoreField.textProperty().isEmpty()
+                .or(coefField.textProperty().isEmpty())
+        );
+
+        dialog.setResultConverter(button -> {
+            if (button == saveType) {
+                try {
+                    double newScore = Double.parseDouble(scoreField.getText().trim());
+                    double newCoef = Double.parseDouble(coefField.getText().trim());
+
+                    if (newScore < 0 || newScore > 20) {
+                        showInfo("Note invalide", "La note doit etre entre 0 et 20.");
+                        return null;
+                    }
+
+                    if (newCoef <= 0) {
+                        showInfo("Coefficient invalide", "Le coefficient doit etre positif.");
+                        return null;
+                    }
+
+                    return new NoteInput(student, course, newScore, newCoef);
+                } catch (NumberFormatException e) {
+                    showInfo("Format invalide", "Veuillez entrer des nombres valides.");
+                    return null;
+                }
+            }
+            return null;
+        });
+
+        return dialog.showAndWait();
     }
 
     private static Node buildReportCardPage(DashboardState state) {
@@ -857,20 +1078,106 @@ public final class DashboardFactory {
 
         Button addSession = new Button("+ Nouvelle seance");
         addSession.getStyleClass().addAll("action-button", "primary-action");
+        addSession.setVisible(state.isAdminMode());
 
-        HBox topRow = state.isAdminMode() ? new HBox(8, filter, addSession) : new HBox(8, filter);
+        HBox topRow = new HBox(8, filter, addSession);
+        topRow.setAlignment(Pos.CENTER_LEFT);
 
         TableView<SessionLine> table = new TableView<>(state.sessions);
         table.getStyleClass().add("data-table");
 
-        TableColumn<SessionLine, String> dayCol = textColumn("JOUR", SessionLine::dayProperty, 120);
-        TableColumn<SessionLine, String> startCol = textColumn("DEBUT", SessionLine::startProperty, 90);
-        TableColumn<SessionLine, String> endCol = textColumn("FIN", SessionLine::endProperty, 90);
-        TableColumn<SessionLine, String> courseCol = textColumn("SEANCE", SessionLine::courseProperty, 200);
-        TableColumn<SessionLine, String> roomCol = textColumn("SALLE", SessionLine::roomProperty, 140);
-        TableColumn<SessionLine, String> teacherCol = textColumn("ENSEIGNANT", SessionLine::teacherProperty, 180);
+        TableColumn<SessionLine, String> dayCol = textColumn("JOUR", SessionLine::dayProperty, 100);
+        TableColumn<SessionLine, String> startCol = textColumn("DEBUT", SessionLine::startProperty, 80);
+        TableColumn<SessionLine, String> endCol = textColumn("FIN", SessionLine::endProperty, 80);
+        TableColumn<SessionLine, String> courseCol = textColumn("SEANCE", SessionLine::courseProperty, 180);
+        TableColumn<SessionLine, String> roomCol = textColumn("SALLE", SessionLine::roomProperty, 120);
+        TableColumn<SessionLine, String> teacherCol = textColumn("ENSEIGNANT", SessionLine::teacherProperty, 140);
 
-        table.getColumns().setAll(dayCol, startCol, endCol, courseCol, roomCol, teacherCol);
+        if (state.isAdminMode()) {
+            TableColumn<SessionLine, SessionLine> actionCol = new TableColumn<>("ACTIONS");
+            actionCol.setPrefWidth(160);
+            actionCol.setCellValueFactory(data -> new SimpleObjectProperty<>(data.getValue()));
+            actionCol.setCellFactory(col -> new TableCell<>() {
+                private final Button edit = new Button("Editer");
+                private final Button delete = new Button("Supprimer");
+                private final HBox box = new HBox(6, edit, delete);
+
+                {
+                    edit.getStyleClass().add("mini-action");
+                    delete.getStyleClass().add("mini-danger");
+                    edit.setOnAction(event -> {
+                        SessionLine line = getItem();
+                        if (line != null) {
+                            Optional<SessionInput> input = showSessionForm(line, state);
+                            input.ifPresent(data -> {
+                                try {
+                                    // Find the database entities
+                                    models.Groupe groupe = state.groupeDao.findById(data.groupeId()).orElse(null);
+                                    models.Enseignant enseignant = state.enseignantDao.findById(data.enseignantId()).orElse(null);
+                                    models.Salle salle = state.salleDao.findAll().stream()
+                                        .filter(s -> s.getIdentifiantSalle().equals(data.room()))
+                                        .findFirst().orElse(null);
+                                    models.Cours cours = state.coursDao.findAll().stream()
+                                        .filter(c -> c.getIntitule().equals(data.course()))
+                                        .findFirst().orElse(null);
+                                    
+                                    if (groupe != null && enseignant != null && salle != null && cours != null) {
+                                        // Create and save the seance to database
+                                        models.Seance seance = new models.Seance(
+                                            "SEA-" + System.currentTimeMillis(),
+                                            parseDay(data.day()).toString(),
+                                            data.start(),
+                                            data.end(),
+                                            groupe,
+                                            enseignant,
+                                            salle,
+                                            cours
+                                        );
+                                        state.seanceDao.update(seance);
+                                        
+                                        // Update the UI
+                                        int index = state.sessions.indexOf(line);
+                                        if (index >= 0) {
+                                            state.sessions.set(index, new SessionLine(line.seanceId(), data.day(), data.start(), data.end(), data.course(), data.room(), data.teacher(), data.groupeId(), data.enseignantId()));
+                                            table.refresh();
+                                        }
+                                        showInfo("Succes", "Seance mise a jour avec succes");
+                                    } else {
+                                        showInfo("Erreur", "Impossible de trouver les donnees requises pour la seance");
+                                    }
+                                } catch (Exception e) {
+                                    showInfo("Erreur", "Erreur lors de la mise a jour: " + e.getMessage());
+                                }
+                            });
+                        }
+                    });
+                    delete.setOnAction(event -> {
+                        SessionLine line = getItem();
+                        if (line != null && showConfirm("Confirmation", "Supprimer cette seance ?")) {
+                            try {
+                                // Delete from database
+                                if (line.seanceId() > 0) {
+                                    state.seanceDao.deleteById(line.seanceId());
+                                }
+                                state.sessions.remove(line);
+                                showInfo("Succes", "Seance supprimee avec succes");
+                            } catch (Exception e) {
+                                showInfo("Erreur", "Erreur lors de la suppression: " + e.getMessage());
+                            }
+                        }
+                    });
+                }
+
+                @Override
+                protected void updateItem(SessionLine item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setGraphic(empty || item == null ? null : box);
+                }
+            });
+            table.getColumns().setAll(dayCol, startCol, endCol, courseCol, roomCol, teacherCol, actionCol);
+        } else {
+            table.getColumns().setAll(dayCol, startCol, endCol, courseCol, roomCol, teacherCol);
+        }
 
         FilteredList<SessionLine> filtered = new FilteredList<>(state.sessions, line -> true);
         table.setItems(filtered);
@@ -880,16 +1187,225 @@ public final class DashboardFactory {
             filtered.setPredicate(line -> "Tout afficher".equals(choice) || line.dayProperty().get().equalsIgnoreCase(choice));
         });
 
-        addSession.setOnAction(event -> runMockAction(addSession, "Ajout...", () -> {
+        addSession.setOnAction(event -> {
             if (!state.isAdminMode()) {
                 showInfo("Action non autorisee", "Seul le chef de departement (admin) peut planifier les seances.");
                 return;
             }
-            state.sessions.add(new SessionLine("Jeudi", "10:00", "12:00", "Algo avancee", "Amphi 101", "TALLA"));
-        }));
+
+            Optional<SessionInput> result = showSessionForm(null, state);
+            result.ifPresent(data -> {
+                try {
+                    // Find the database entities
+                    models.Groupe groupe = state.groupeDao.findById(data.groupeId()).orElse(null);
+                    models.Enseignant enseignant = state.enseignantDao.findById(data.enseignantId()).orElse(null);
+                    models.Salle salle = state.salleDao.findAll().stream()
+                        .filter(s -> s.getIdentifiantSalle().equals(data.room()))
+                        .findFirst().orElse(null);
+                    models.Cours cours = state.coursDao.findAll().stream()
+                        .filter(c -> c.getIntitule().equals(data.course()))
+                        .findFirst().orElse(null);
+                    
+                    if (groupe != null && enseignant != null && salle != null && cours != null) {
+                        // Create and save the seance to database
+                        models.Seance seance = new models.Seance(
+                            "SEA-" + System.currentTimeMillis(),
+                            parseDay(data.day()).toString(),
+                            data.start(),
+                            data.end(),
+                            groupe,
+                            enseignant,
+                            salle,
+                            cours
+                        );
+                        models.Seance saved = state.seanceDao.save(seance);
+                        
+                        // Add to UI with database ID
+                        state.sessions.add(new SessionLine(saved.getId(), data.day(), data.start(), data.end(), data.course(), data.room(), data.teacher(), data.groupeId(), data.enseignantId()));
+                        showInfo("Succes", "Seance creee avec succes");
+                    } else {
+                        showInfo("Erreur", "Impossible de trouver les donnees requises pour la seance");
+                    }
+                } catch (Exception e) {
+                    showInfo("Erreur", "Erreur lors de l'ajout: " + e.getMessage());
+                }
+            });
+        });
 
         page.getChildren().addAll(topRow, table);
         return page;
+    }
+
+    private static Optional<SessionInput> showSessionForm(SessionLine current, DashboardState state) {
+        Dialog<SessionInput> dialog = createEntityDialog(
+            current == null ? "Ajouter une seance" : "Modifier la seance",
+            current == null ? "Creer une nouvelle seance planifiee" : "Modifier les informations de la seance"
+        );
+
+        ButtonType saveType = new ButtonType(current == null ? "Ajouter" : "Enregistrer", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(saveType, ButtonType.CANCEL);
+        styleDialogButtons(dialog, saveType);
+
+        ComboBox<String> dayCombo = new ComboBox<>(FXCollections.observableArrayList(
+            "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"
+        ));
+        dayCombo.setValue(current == null ? "Lundi" : current.day());
+        dayCombo.setPrefWidth(250);
+
+        TextField startField = new TextField(current == null ? "08:00" : current.start());
+        startField.setPromptText("Heure debut (HH:MM)");
+
+        TextField endField = new TextField(current == null ? "10:00" : current.end());
+        endField.setPromptText("Heure fin (HH:MM)");
+
+        // Dropdown for Groups
+        ComboBox<GroupLine> groupCombo = new ComboBox<>(state.groups);
+        groupCombo.setCellFactory(param -> new ListCell<>() {
+            @Override
+            protected void updateItem(GroupLine item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.name() + " (" + item.level() + " " + item.track() + ")");
+            }
+        });
+        groupCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(GroupLine item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.name() + " (" + item.level() + " " + item.track() + ")");
+            }
+        });
+
+        // Dropdown for Courses
+        ComboBox<Course> courseCombo = new ComboBox<>(state.courses);
+        courseCombo.setCellFactory(param -> new ListCell<>() {
+            @Override
+            protected void updateItem(Course item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.title());
+            }
+        });
+        courseCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(Course item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.title());
+            }
+        });
+        if (current != null) {
+            state.courses.stream()
+                .filter(c -> c.title().equals(current.course()))
+                .findFirst()
+                .ifPresent(courseCombo::setValue);
+        }
+
+        // Dropdown for Rooms
+        ComboBox<Room> roomCombo = new ComboBox<>(state.rooms);
+        roomCombo.setCellFactory(param -> new ListCell<>() {
+            @Override
+            protected void updateItem(Room item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.name() + " (" + item.type() + ")");
+            }
+        });
+        roomCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(Room item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.name() + " (" + item.type() + ")");
+            }
+        });
+        if (current != null) {
+            state.rooms.stream()
+                .filter(r -> r.name().equals(current.room()))
+                .findFirst()
+                .ifPresent(roomCombo::setValue);
+        }
+
+        // Dropdown for Teachers
+        ComboBox<Teacher> teacherCombo = new ComboBox<>(state.teachers);
+        teacherCombo.setCellFactory(param -> new ListCell<>() {
+            @Override
+            protected void updateItem(Teacher item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.lastName() + " " + item.firstName());
+            }
+        });
+        teacherCombo.setButtonCell(new ListCell<>() {
+            @Override
+            protected void updateItem(Teacher item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.lastName() + " " + item.firstName());
+            }
+        });
+        if (current != null) {
+            state.teachers.stream()
+                .filter(t -> (t.lastName() + " " + t.firstName()).equals(current.teacher()))
+                .findFirst()
+                .ifPresent(teacherCombo::setValue);
+        }
+
+        GridPane grid = formGrid();
+        addFormRow(grid, 0, "Jour", dayCombo);
+        addFormRow(grid, 1, "Groupe", groupCombo);
+        addFormRow(grid, 2, "Debut", startField);
+        addFormRow(grid, 3, "Fin", endField);
+        addFormRow(grid, 4, "Seance", courseCombo);
+        addFormRow(grid, 5, "Salle", roomCombo);
+        addFormRow(grid, 6, "Enseignant", teacherCombo);
+
+        dialog.getDialogPane().setContent(grid);
+
+        Node saveButton = dialog.getDialogPane().lookupButton(saveType);
+        saveButton.disableProperty().bind(
+            dayCombo.valueProperty().isNull()
+                .or(groupCombo.valueProperty().isNull())
+                .or(startField.textProperty().isEmpty())
+                .or(endField.textProperty().isEmpty())
+                .or(courseCombo.valueProperty().isNull())
+                .or(roomCombo.valueProperty().isNull())
+                .or(teacherCombo.valueProperty().isNull())
+        );
+
+        dialog.setResultConverter(button -> {
+            if (button == saveType) {
+                String start = startField.getText().trim();
+                String end = endField.getText().trim();
+
+                // Validation du format HH:MM
+                if (!start.matches("^([01]?[0-9]|2[0-3]):[0-5][0-9]$")) {
+                    showInfo("Format invalide", "L'heure de debut doit etre au format HH:MM");
+                    return null;
+                }
+                if (!end.matches("^([01]?[0-9]|2[0-3]):[0-5][0-9]$")) {
+                    showInfo("Format invalide", "L'heure de fin doit etre au format HH:MM");
+                    return null;
+                }
+
+                Course selectedCourse = courseCombo.getValue();
+                Room selectedRoom = roomCombo.getValue();
+                Teacher selectedTeacher = teacherCombo.getValue();
+                GroupLine selectedGroup = groupCombo.getValue();
+
+                if (selectedCourse == null || selectedRoom == null || selectedTeacher == null || selectedGroup == null) {
+                    showInfo("Erreur", "Veuillez selectionner tous les champs requis.");
+                    return null;
+                }
+
+                return new SessionInput(
+                    dayCombo.getValue(),
+                    start,
+                    end,
+                    selectedCourse.title(),
+                    selectedRoom.name(),
+                    selectedTeacher.lastName() + " " + selectedTeacher.firstName(),
+                    selectedGroup.id(),  // groupeId from selected group
+                    selectedTeacher.id()  // enseignantId from selected teacher
+                );
+            }
+            return null;
+        });
+
+        return dialog.showAndWait();
     }
 
     private static <T> VBox buildDataPage(
@@ -1600,6 +2116,36 @@ public final class DashboardFactory {
         dialog.showAndWait();
     }
 
+    private static boolean showConfirm(String title, String content) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        applyDialogTheme(dialog);
+        dialog.setTitle(title);
+        dialog.getDialogPane().getStyleClass().add("message-dialog");
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.YES, ButtonType.NO);
+
+        Label icon = new Label("?");
+        icon.getStyleClass().addAll("message-icon", "message-warning");
+
+        Label heading = new Label(title);
+        heading.getStyleClass().add("message-title");
+
+        Label body = new Label(content);
+        body.getStyleClass().add("message-body");
+        body.setWrapText(true);
+
+        VBox contentBox = new VBox(8, icon, heading, body);
+        contentBox.getStyleClass().add("message-box");
+        dialog.getDialogPane().setContent(contentBox);
+
+        Node yesButton = dialog.getDialogPane().lookupButton(ButtonType.YES);
+        yesButton.getStyleClass().add("dialog-primary-button");
+        Node noButton = dialog.getDialogPane().lookupButton(ButtonType.NO);
+        noButton.getStyleClass().add("dialog-secondary-button");
+
+        Optional<ButtonType> result = dialog.showAndWait();
+        return result.isPresent() && result.get() == ButtonType.YES;
+    }
+
     private static void runMockAction(Button button, String loadingLabel, Runnable action) {
         String initialText = button.getText();
         button.setDisable(true);
@@ -1823,17 +2369,49 @@ public final class DashboardFactory {
     private record CredentialInput(String identifier, String password) {
     }
 
+    private record NoteInput(String student, String course, double score, double coef) {
+    }
+
+    private record SessionInput(String day, String start, String end, String course, String room, String teacher, int groupeId, int enseignantId) {
+        // Backward compatibility constructor
+        SessionInput(String day, String start, String end, String course, String room, String teacher) {
+            this(day, start, end, course, room, teacher, -1, -1);
+        }
+    }
+
     private static final class NoteLine {
+        private final int id;
+        private final int studentId;
+        private final int courseId;
         private final SimpleStringProperty student;
         private final SimpleStringProperty course;
         private final DoubleProperty score;
         private final DoubleProperty coef;
 
         private NoteLine(String student, String course, double score, double coef) {
+            this(0, 0, 0, student, course, score, coef);
+        }
+
+        private NoteLine(int id, int studentId, int courseId, String student, String course, double score, double coef) {
+            this.id = id;
+            this.studentId = studentId;
+            this.courseId = courseId;
             this.student = new SimpleStringProperty(student);
             this.course = new SimpleStringProperty(course);
             this.score = new SimpleDoubleProperty(score);
             this.coef = new SimpleDoubleProperty(coef);
+        }
+
+        int getId() {
+            return id;
+        }
+
+        int getStudentId() {
+            return studentId;
+        }
+
+        int getCourseId() {
+            return courseId;
         }
 
         SimpleStringProperty studentProperty() {
@@ -1853,7 +2431,13 @@ public final class DashboardFactory {
         }
     }
 
-    private record SessionLine(String day, String start, String end, String course, String room, String teacher) {
+    private record SessionLine(int seanceId, String day, String start, String end, String course, String room, String teacher, int groupeId, int enseignantId) {
+        
+        // Constructor without IDs for backward compatibility (for new sessions)
+        SessionLine(String day, String start, String end, String course, String room, String teacher) {
+            this(0, day, start, end, course, room, teacher, -1, -1);
+        }
+
         SimpleStringProperty dayProperty() {
             return new SimpleStringProperty(day);
         }
@@ -1893,6 +2477,9 @@ public final class DashboardFactory {
         private final CoursDao coursDao;
         private final GroupeDao groupeDao;
         private final SalleDao salleDao;
+        private final NotesDao notesDao;
+        private final SeanceDao seanceDao;
+        private final InscriptionDao inscriptionDao;
         private final AuthService authService;
 
         private final ObservableList<Student> students;
@@ -1925,6 +2512,9 @@ public final class DashboardFactory {
             this.coursDao = new CoursDao();
             this.groupeDao = new GroupeDao();
             this.salleDao = new SalleDao();
+            this.notesDao = new NotesDao();
+            this.seanceDao = new SeanceDao();
+            this.inscriptionDao = new InscriptionDao();
             this.authService = new AuthService();
 
             seedIfEmpty();
@@ -1937,26 +2527,21 @@ public final class DashboardFactory {
             this.currentStudent = resolveCurrentStudent();
             this.currentTeacher = resolveCurrentTeacher();
 
-            ObservableList<NoteLine> seededNotes = FXCollections.observableArrayList(
-                new NoteLine("Jordan Mateo BALLA", "Merise", 15.0, 2.0),
-                new NoteLine("Jordan Mateo BALLA", "Systeme d'exploitation", 13.0, 2.0),
-                new NoteLine("Mac Arthur EDAMBO", "Merise", 14.0, 2.0),
-                new NoteLine("Martial Bienvenu JEUKING", "IA appliquee", 16.0, 3.0)
-            );
+            // Charger les notes depuis la base de données
+            List<NoteLine> loadedNotes = loadNotesFromDatabase();
 
             this.notes = isStudentMode() && currentStudent != null
-                ? FXCollections.observableArrayList(filterNotesForStudent(seededNotes, currentStudent))
-                : seededNotes;
+                ? FXCollections.observableArrayList(filterNotesForStudent(loadedNotes, currentStudent))
+                : FXCollections.observableArrayList(loadedNotes);
 
-            ObservableList<SessionLine> seededSessions = FXCollections.observableArrayList(
-                new SessionLine("Lundi", "08:00", "10:00", "Merise TD1", "Amphi 102", "TALLA"),
-                new SessionLine("Mardi", "10:00", "12:00", "Info 214 TD1", "Amphi 102", "NGAFFO"),
-                new SessionLine("Mercredi", "06:00", "07:00", "Info 214 TD1", "Amphi 102", "NDJOCK")
-            );
+            // Charger les séances depuis la base de données
+            List<SessionLine> loadedSessions = loadSessionsFromDatabase();
 
             this.sessions = isStudentMode() && currentStudent != null
-                ? FXCollections.observableArrayList(filterSessionsForStudent(seededSessions, this.notes))
-                : seededSessions;
+                ? FXCollections.observableArrayList(filterSessionsForStudent(loadedSessions, currentStudent))
+                : (isTeacherMode() && currentTeacher != null
+                    ? FXCollections.observableArrayList(filterSessionsForTeacher(loadedSessions, currentTeacher, courses))
+                    : FXCollections.observableArrayList(loadedSessions));
 
             ObservableList<String> seededEnrollments = FXCollections.observableArrayList(
                 "Mac Arthur EDAMBO - Merise - TD1",
@@ -1993,7 +2578,7 @@ public final class DashboardFactory {
                 this.sessions.setAll(filterSessionsForTeacher(this.sessions, currentTeacher, this.courses));
                 this.recentEnrollments.setAll(filterEnrollmentsForTeacher(this.recentEnrollments, this.courses));
                 this.nextSessions.setAll(filterNextSessionsForTeacher(this.nextSessions, this.courses));
-                this.students.setAll(filterStudentsForTeacher(this.students, this.notes));
+                // Les étudiants sont affichés sans filtrage pour permettre à l'enseignant d'ajouter des notes
             }
 
             this.studentCounter = new AtomicInteger(students.size() + 1);
@@ -2061,6 +2646,63 @@ public final class DashboardFactory {
                 .toList();
         }
 
+        private List<NoteLine> loadNotesFromDatabase() {
+            List<NoteLine> noteLines = new ArrayList<>();
+            try {
+                List<models.Note> databaseNotes = notesDao.findAll();
+                for (models.Note note : databaseNotes) {
+                    models.Etudiant student = etudiantDao.findById(note.getEtudiantId()).orElse(null);
+                    models.Cours course = coursDao.findById(note.getCoursId()).orElse(null);
+                    
+                    if (student != null && course != null) {
+                        String studentName = student.getPrenom() + " " + student.getNom();
+                        noteLines.add(new NoteLine(note.getId(), student.getId(), course.getId(), studentName, course.getIntitule(), note.getScore(), note.getCoefficient()));
+                    }
+                }
+            } catch (Exception e) {
+                // Si erreur, retourner liste vide (notes en mémoire seulement)
+                System.err.println("Erreur chargement notes: " + e.getMessage());
+            }
+            return noteLines;
+        }
+
+        private List<SessionLine> loadSessionsFromDatabase() {
+            List<SessionLine> sessionLines = new ArrayList<>();
+            try {
+                List<models.Seance> databaseSeances = seanceDao.findAll();
+                for (models.Seance seance : databaseSeances) {
+                    String day = getJourFrancais(seance.getDate().getDayOfWeek().name());
+                    String start = seance.getHeureDebutIso();
+                    String end = seance.getHeureFinIso();
+                    String course = seance.getCours().getIntitule();
+                    String room = seance.getSalle().getIdentifiantSalle();
+                    String teacher = seance.getEnseignant().getNom();
+                    int groupeId = seance.getGroupe().getId();
+                    int enseignantId = seance.getEnseignant().getId();
+                    int seanceId = seance.getId();
+                    
+                    sessionLines.add(new SessionLine(seanceId, day, start, end, course, room, teacher, groupeId, enseignantId));
+                }
+            } catch (Exception e) {
+                // Si erreur, retourner liste vide
+                System.err.println("Erreur chargement séances: " + e.getMessage());
+            }
+            return sessionLines;
+        }
+
+        private String getJourFrancais(String dayOfWeek) {
+            return switch (dayOfWeek) {
+                case "MONDAY" -> "Lundi";
+                case "TUESDAY" -> "Mardi";
+                case "WEDNESDAY" -> "Mercredi";
+                case "THURSDAY" -> "Jeudi";
+                case "FRIDAY" -> "Vendredi";
+                case "SATURDAY" -> "Samedi";
+                case "SUNDAY" -> "Dimanche";
+                default -> dayOfWeek;
+            };
+        }
+
         private boolean isStudentMode() {
             return STUDENT_ROLE.equals(roleTitle);
         }
@@ -2110,17 +2752,38 @@ public final class DashboardFactory {
                 .toList();
         }
 
-        private List<SessionLine> filterSessionsForStudent(List<SessionLine> allSessions, List<NoteLine> studentNotes) {
-            Set<String> ownCourses = new HashSet<>();
-            for (NoteLine note : studentNotes) {
-                ownCourses.add(note.courseProperty().get().toLowerCase());
+        private List<SessionLine> filterSessionsForStudent(List<SessionLine> allSessions, Student student) {
+            if (student == null) {
+                return allSessions;
             }
-            if (ownCourses.isEmpty()) {
-                return List.of();
+            
+            try {
+                // Get student's inscriptions to find their groupe IDs
+                Set<Integer> studentGroupeIds = new HashSet<>();
+                models.Etudiant dbStudent = etudiantDao.findById(student.id()).orElse(null);
+                
+                if (dbStudent != null) {
+                    // Get all inscriptions and filter by this student
+                    List<models.Inscription> allInscriptions = inscriptionDao.findAll();
+                    for (models.Inscription insc : allInscriptions) {
+                        if (insc.getEtudiant().getId() == dbStudent.getId()) {
+                            studentGroupeIds.add(insc.getGroupe().getId());
+                        }
+                    }
+                }
+                
+                if (studentGroupeIds.isEmpty()) {
+                    return List.of();
+                }
+                
+                // Filter sessions by student's groupe IDs
+                return allSessions.stream()
+                    .filter(session -> studentGroupeIds.contains(session.groupeId))
+                    .toList();
+            } catch (Exception e) {
+                System.err.println("Erreur filtrage sessions pour étudiant: " + e.getMessage());
+                return allSessions;
             }
-            return allSessions.stream()
-                .filter(session -> ownCourses.stream().anyMatch(course -> session.courseProperty().get().toLowerCase().contains(course)))
-                .toList();
         }
 
         private List<String> filterNextSessionsForStudent(List<String> allNextSessions, List<NoteLine> studentNotes) {
@@ -2168,19 +2831,36 @@ public final class DashboardFactory {
         }
 
         private List<SessionLine> filterSessionsForTeacher(List<SessionLine> allSessions, Teacher teacher, List<Course> teacherCourses) {
-            Set<String> courseTitles = new HashSet<>();
-            for (Course course : teacherCourses) {
-                courseTitles.add(course.title().toLowerCase());
+            try {
+                // Get the teacher's database ID
+                models.Enseignant dbTeacher = enseignantDao.findById(teacher.id()).orElse(null);
+                
+                if (dbTeacher == null) {
+                    // Fallback to old method if teacher not found in DB
+                    Set<String> courseTitles = new HashSet<>();
+                    for (Course course : teacherCourses) {
+                        courseTitles.add(course.title().toLowerCase());
+                    }
+                    String teacherLastName = teacher.lastName().toLowerCase();
+                    return allSessions.stream()
+                        .filter(session -> {
+                            String teacherValue = session.teacherProperty().get().toLowerCase();
+                            String courseValue = session.courseProperty().get().toLowerCase();
+                            return teacherValue.contains(teacherLastName)
+                                || courseTitles.stream().anyMatch(courseValue::contains);
+                        })
+                        .toList();
+                }
+                
+                final int teacherId = dbTeacher.getId();
+                // Filter sessions by teacher's ID
+                return allSessions.stream()
+                    .filter(session -> session.enseignantId == teacherId)
+                    .toList();
+            } catch (Exception e) {
+                System.err.println("Erreur filtrage sessions pour enseignant: " + e.getMessage());
+                return allSessions;
             }
-            String teacherLastName = teacher.lastName().toLowerCase();
-            return allSessions.stream()
-                .filter(session -> {
-                    String teacherValue = session.teacherProperty().get().toLowerCase();
-                    String courseValue = session.courseProperty().get().toLowerCase();
-                    return teacherValue.contains(teacherLastName)
-                        || courseTitles.stream().anyMatch(courseValue::contains);
-                })
-                .toList();
         }
 
         private List<String> filterEnrollmentsForTeacher(List<String> enrollments, List<Course> teacherCourses) {
@@ -2242,7 +2922,6 @@ public final class DashboardFactory {
                     Module.HOME,
                     Module.COURSES,
                     Module.NOTES,
-                    Module.REPORT_CARDS,
                     Module.PLANNING
                 );
                 case STUDENT_ROLE -> List.of(
